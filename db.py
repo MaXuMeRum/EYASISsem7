@@ -3,6 +3,7 @@ import sqlite3
 from pathlib import Path
 from collections import Counter, defaultdict
 import math
+import numpy as np
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "index.db"
@@ -40,8 +41,15 @@ def init_db():
         tf          INTEGER NOT NULL,
         weight      REAL    NOT NULL,
         PRIMARY KEY (term_id, doc_id),
-        FOREIGN KEY (term_id) REFERENCES terms(id)   ON DELETE CASCADE,
+        FOREIGN KEY (term_id) REFERENCES terms(id)     ON DELETE CASCADE,
         FOREIGN KEY (doc_id)  REFERENCES documents(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS embeddings (
+        doc_id      INTEGER PRIMARY KEY,
+        dim         INTEGER NOT NULL,
+        vector      BLOB    NOT NULL,
+        FOREIGN KEY (doc_id) REFERENCES documents(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS meta (
@@ -58,9 +66,10 @@ def init_db():
 
 
 def clear_index():
-    """Полная очистка индекса (документы остаются)."""
+    """Полная очистка индекса (документы удаляются)."""
     conn = get_conn()
     conn.executescript("""
+        DELETE FROM embeddings;
         DELETE FROM postings;
         DELETE FROM terms;
         DELETE FROM documents;
@@ -73,19 +82,15 @@ def clear_index():
 def save_index(parsed_docs):
     """
     parsed_docs: список словарей:
-      {
-        'filename': str,
-        'text': str,
-        'tf': Counter({lemma: count}),
-        'terms': list[lemma],
-      }
+      {'filename': str, 'text': str, 'tf': Counter({lemma: count}), 'terms': list[lemma]}
     Пересчитывает df/idf/weights и сохраняет всё в БД.
+    Возвращает список doc_id в порядке вставки.
     """
     conn = get_conn()
     cur = conn.cursor()
 
-    # 1. Чистим всё (полная переиндексация)
     cur.executescript("""
+        DELETE FROM embeddings;
         DELETE FROM postings;
         DELETE FROM terms;
         DELETE FROM documents;
@@ -96,27 +101,23 @@ def save_index(parsed_docs):
     if N == 0:
         conn.commit()
         conn.close()
-        return
+        return []
 
-    # 2. df по всем документам
     df = Counter()
     for d in parsed_docs:
         for term in d["tf"]:
             df[term] += 1
 
-    # 3. idf: B_i = ln(N / df_i)
     idf = {t: math.log(N / c) if c else 0.0 for t, c in df.items()}
 
-    # 4. Вставляем документы, получаем их id
-    doc_ids = {}
+    doc_ids_ordered = []
     for d in parsed_docs:
         cur.execute(
             "INSERT INTO documents(filename, text, length) VALUES (?,?,?)",
             (d["filename"], d["text"], len(d["terms"]))
         )
-        doc_ids[d["filename"]] = cur.lastrowid
+        doc_ids_ordered.append(cur.lastrowid)
 
-    # 5. Вставляем термины
     term_ids = {}
     for lemma, dfv in df.items():
         cur.execute(
@@ -125,10 +126,9 @@ def save_index(parsed_docs):
         )
         term_ids[lemma] = cur.lastrowid
 
-    # 6. Вставляем постинги: weight = tf * idf
     postings = []
-    for d in parsed_docs:
-        did = doc_ids[d["filename"]]
+    for k, d in enumerate(parsed_docs):
+        did = doc_ids_ordered[k]
         for lemma, tf in d["tf"].items():
             tid = term_ids[lemma]
             w = tf * idf[lemma]
@@ -138,16 +138,59 @@ def save_index(parsed_docs):
         postings
     )
 
-    # 7. meta
     cur.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('N',?)", (str(N),))
     cur.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('built_at',datetime('now'))")
 
     conn.commit()
     conn.close()
+    return doc_ids_ordered
+
+
+def save_embeddings(embeddings: dict[int, np.ndarray]):
+    """embeddings: {doc_id: np.ndarray[float32]}"""
+    if not embeddings:
+        return
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM embeddings")
+    for doc_id, vec in embeddings.items():
+        vec = np.asarray(vec, dtype=np.float32)
+        cur.execute(
+            "INSERT INTO embeddings(doc_id, dim, vector) VALUES (?,?,?)",
+            (doc_id, int(vec.shape[0]), vec.tobytes())
+        )
+    conn.commit()
+    conn.close()
+
+
+def load_embeddings() -> dict[int, np.ndarray]:
+    conn = get_conn()
+    result = {}
+    try:
+        for row in conn.execute("SELECT doc_id, dim, vector FROM embeddings"):
+            arr = np.frombuffer(row["vector"], dtype=np.float32)
+            result[row["doc_id"]] = arr.copy()
+    except sqlite3.OperationalError:
+        pass
+    conn.close()
+    return result
+
+
+def embeddings_ready() -> bool:
+    if not DB_PATH.exists():
+        return False
+    conn = get_conn()
+    try:
+        n = conn.execute("SELECT COUNT(*) AS c FROM embeddings").fetchone()["c"]
+        return n > 0
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        conn.close()
 
 
 def load_documents():
-    """Возвращает словарь {doc_id: {'id','filename','text',...}} + ключевые слова."""
+    """Возвращает {doc_id: {id, filename, text, tf, weights, keywords}}."""
     conn = get_conn()
 
     docs = {}
@@ -161,20 +204,15 @@ def load_documents():
             "keywords": [],
         }
 
-    # tf + weights
-    for row in conn.execute(
-        "SELECT term_id, doc_id, tf, weight FROM postings"
-    ):
+    for row in conn.execute("SELECT term_id, doc_id, tf, weight FROM postings"):
         d = docs.get(row["doc_id"])
         if not d:
             continue
         d["tf"][row["term_id"]] = row["tf"]
         d["weights"][row["term_id"]] = row["weight"]
 
-    # lemma map
     term_lemma = {r["id"]: r["lemma"] for r in conn.execute("SELECT id, lemma FROM terms")}
 
-    # Переводим tf/weights в lemma-ключи и считаем ключевые слова
     for d in docs.values():
         d["tf"] = {term_lemma[t]: v for t, v in d["tf"].items()}
         d["weights"] = {term_lemma[t]: v for t, v in d["weights"].items()}
@@ -208,7 +246,7 @@ def get_meta():
     return meta
 
 
-def db_exists_and_filled():
+def db_exists_and_filled() -> bool:
     if not DB_PATH.exists():
         return False
     conn = get_conn()

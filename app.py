@@ -18,11 +18,22 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-import db  # <-- модуль работы с SQLite
+import db
+import semantic
 
 BASE_DIR = Path(__file__).resolve().parent
 DOCUMENTS_DIR = BASE_DIR / "documents"
 ALLOWED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx"}
+
+# ---- Гибридная модель: вклад логики и семантики ----
+ALPHA = 0.5
+BETA  = 0.5
+
+# Порог, ниже которого семантическое совпадение не показываем
+SEM_THRESHOLD = 0.90
+# Сколько лучших пар «слово запроса ↔ слово документа» показывать
+TOP_MATCHES = 3
+ONLY_STRONG_MATCHES = True
 
 app = Flask(__name__)
 morph = pymorphy3.MorphAnalyzer()
@@ -74,21 +85,15 @@ def read_document(path):
 
 
 class SearchIndex:
-    """
-    Обёртка над SQLite.
-    - documents / inverted / idf / term_ids живут в памяти (для скорости);
-    - сами тексты, постинги и веса — в БД index.db.
-    """
-
     def __init__(self):
-        self.documents = {}          # {doc_id: {...}}
+        self.documents = {}
         self.df = Counter()
         self.idf = {}
         self.inverted = defaultdict(set)
         self.term_ids = {}
         self.meta = {}
+        self.embeddings = {}
 
-    # ---------- лемматизация ----------
     def lemma(self, word):
         word = word.lower().replace("ё", "е")
         if word in STOP_WORDS or len(word) < 2:
@@ -103,16 +108,12 @@ class SearchIndex:
                 result.append(w)
         return result
 
-    # ---------- пересборка индекса ----------
     def rebuild(self):
-        """Читает documents/, лемматизирует и сохраняет всё в SQLite."""
         db.init_db()
-
         files = sorted(
             p for p in DOCUMENTS_DIR.iterdir()
             if p.is_file() and p.suffix.lower() in ALLOWED_EXTENSIONS
         )
-
         parsed = []
         for path in files:
             text = read_document(path)
@@ -124,13 +125,24 @@ class SearchIndex:
                 "terms": terms,
                 "tf": tf,
             })
-
         db.save_index(parsed)
         self.load()
+        self.build_embeddings()
 
-    # ---------- загрузка из БД ----------
+    def build_embeddings(self):
+        if not self.documents:
+            self.embeddings = {}
+            return
+        ids = list(self.documents.keys())
+        texts = [self.documents[i]["text"] for i in ids]
+        vecs = semantic.embed_texts(texts)
+        self.embeddings = {i: vecs[k] for k, i in enumerate(ids)}
+        db.save_embeddings(self.embeddings)
+
+    def load_embeddings(self):
+        self.embeddings = db.load_embeddings()
+
     def load(self):
-        """Загружает индекс из SQLite в память."""
         db.init_db()
         self.documents = db.load_documents()
         inv, tid = db.load_inverted()
@@ -146,6 +158,11 @@ class SearchIndex:
         self.meta = db.get_meta()
         conn.close()
 
+        if db.embeddings_ready():
+            self.load_embeddings()
+        else:
+            self.embeddings = {}
+
     @property
     def all_ids(self):
         return set(self.documents)
@@ -153,6 +170,8 @@ class SearchIndex:
 
 INDEX = SearchIndex()
 
+
+# ---------- логический поиск ----------
 
 def operator(token):
     return {
@@ -175,7 +194,6 @@ def tokenize_query(query):
             if w:
                 out.append(w)
 
-    # ЕЯ-запрос без операторов = неявное AND.
     result = []
     prev = None
     for token in out:
@@ -237,23 +255,142 @@ def evaluate(post):
     return stack[0]
 
 
-def search(query):
+# ---------- семантические совпадения «слово запроса ↔ слово документа» ----------
+
+def find_semantic_matches(query_terms, doc, top_n=TOP_MATCHES,
+                          threshold=SEM_THRESHOLD):
+    """
+    Для документа возвращает список пар:
+        {
+            'query_term': str,   # слово из запроса
+            'doc_term':   str,   # слово из документа
+            'similarity': float,
+            'source_form': str,  # исходная словоформа из текста документа
+        }
+    Только пары с similarity >= threshold, отсортированные по убыванию.
+    """
+    if not query_terms:
+        return []
+
+    # Берём топ-30 ключевых слов документа по весу A_ij
+    doc_terms = [w for w, _ in doc.get("keywords", [])][:30]
+    if not doc_terms:
+        # на случай, если ключевых слов нет — берём все леммы с tf
+        doc_terms = list(doc.get("tf", {}).keys())[:30]
+    if not doc_terms:
+        return []
+
+    # Убираем пересечение с запросом: те слова, что уже есть в запросе,
+    # логическая модель и так нашла — показывать их как «семантические» не нужно.
+    doc_terms = [d for d in doc_terms if d not in set(query_terms)]
+    if not doc_terms:
+        return []
+
+    try:
+        q_vecs = semantic.embed_texts(query_terms)
+        d_vecs = semantic.embed_texts(doc_terms)
+    except Exception as e:
+        print(f"[semantic] ошибка при расчёте совпадений: {e}")
+        return []
+
+    # Ищем исходную словоформу каждого слова документа в тексте
+    text_lower = doc.get("text", "").lower().replace("ё", "е")
+    source_forms = {}
+    for d in doc_terms:
+        for tok in TOKEN_RE.findall(text_lower):
+            if INDEX.lemma(tok) == d:
+                source_forms[d] = tok
+                break
+        source_forms.setdefault(d, d)
+
+    pairs = []
+    for i, q in enumerate(query_terms):
+        for j, d in enumerate(doc_terms):
+            sim = float(q_vecs[i] @ d_vecs[j])
+            if sim < threshold:
+                continue
+            pairs.append({
+                "query_term": q,
+                "doc_term": d,
+                "similarity": sim,
+                "source_form": source_forms.get(d, d),
+            })
+
+    pairs.sort(key=lambda x: -x["similarity"])
+    return pairs[:top_n]
+
+
+# ---------- гибридный поиск ----------
+
+def search(query, alpha=ALPHA, beta=BETA, use_semantic=True):
     tokens = tokenize_query(query)
     if not tokens:
         return [], ""
+
     found = evaluate(postfix(tokens))
     qterms = list(dict.fromkeys(
         x for x in tokens if x not in OPERATORS and x not in {"(", ")"}
     ))
-    results = []
+
+    # 1) логические баллы
+    logical_scores, present_map = {}, {}
     for doc_id in found:
         doc = INDEX.documents[doc_id]
         present = [x for x in qterms if x in doc["tf"]]
-        score = sum(doc["weights"].get(x, 0) for x in present)
-        results.append((score, doc, present))
-    results.sort(key=lambda x: (-x[0], x[1]["filename"].lower()))
+        present_map[doc_id] = present
+        logical_scores[doc_id] = sum(doc["weights"].get(x, 0) for x in present)
+
+    if logical_scores:
+        max_log = max(logical_scores.values()) or 1.0
+        logical_scores = {k: v / max_log for k, v in logical_scores.items()}
+
+    # 2) семантические баллы
+    semantic_scores = {}
+    if use_semantic and INDEX.embeddings:
+        try:
+            qv = semantic.embed_one(query)
+            if found:
+                ranked = semantic.semantic_ranking(
+                    qv, INDEX.embeddings, candidate_ids=found
+                )
+            else:
+                ranked = semantic.semantic_ranking(qv, INDEX.embeddings)
+            semantic_scores = dict(ranked)
+            if not found and semantic_scores:
+                found = set(semantic_scores.keys())
+                for doc_id in found:
+                    present_map.setdefault(doc_id, [])
+        except Exception as e:
+            print(f"[semantic] ошибка: {e}")
+            semantic_scores = {}
+
+    # 3) гибридные баллы + семантические совпадения
+    results = []
+    for doc_id in found:
+        doc = INDEX.documents[doc_id]
+        s_log = logical_scores.get(doc_id, 0.0)
+        s_sem = semantic_scores.get(doc_id, 0.0)
+        score = alpha * s_log + beta * s_sem
+
+        # Считаем совпадения «слово запроса ↔ слово документа»
+        matches = []
+        if s_sem > 0:
+            matches = find_semantic_matches(qterms, doc)
+
+        results.append({
+            "score": score,
+            "logical": s_log,
+            "semantic": s_sem,
+            "doc": doc,
+            "present": present_map.get(doc_id, []),
+            "matches": matches,
+        })
+
+    results.sort(key=lambda x: (-x["score"], x["doc"]["filename"].lower()))
     return results, " ".join(tokens)
 
+
+# ---------- метрики ----------
 
 def metrics(ranked, relevant):
     retrieved = set(ranked)
@@ -282,7 +419,7 @@ def metrics(ranked, relevant):
         "P@5": p_at(5),
         "P@10": p_at(10),
         "Average Precision (AP)": ap,
-        "R-Precision": rprec
+        "R-Precision": rprec,
     }
 
 
@@ -314,6 +451,8 @@ def pr_chart(ranked, relevant):
     return base64.b64encode(buf.getvalue()).decode()
 
 
+# ---------- HTML ----------
+
 CSS = """
 body{margin:0;background:#f4f6f8;color:#202124;font-family:Arial,sans-serif}
 header{background:white;border-bottom:1px solid #ddd;padding:18px 28px}
@@ -323,10 +462,12 @@ main{max-width:1100px;margin:24px auto;padding:0 16px}
 input[type=text]{width:min(720px,90%);padding:12px;border:1px solid #bbb;border-radius:8px;font-size:16px}
 button{padding:11px 16px;border:0;border-radius:8px;cursor:pointer}
 .badge{display:inline-block;background:#edf1f5;border-radius:20px;padding:5px 9px;margin:2px}
+.badge-sem{display:inline-block;background:#e8f5e9;border:1px solid #a5d6a7;border-radius:20px;padding:5px 9px;margin:2px}
 .muted{color:#666}.error{color:#b00020}
 table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #ddd;text-align:left}
 .chart{max-width:760px;width:100%}
 code{background:#f0f2f5;padding:2px 5px;border-radius:4px}
+.match{color:#2e7d32}
 """
 
 TEMPLATE = """
@@ -334,10 +475,14 @@ TEMPLATE = """
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>СИП — информационный поиск</title><style>{{css}}</style></head>
 <body><header><b>СИП — русскоязычный логический поиск</b>
-<nav><a href="/">Поиск</a><a href="/upload">Загрузка файлов</a>
-<a href="/index">Индекс</a><a href="/db">БД</a>
+<nav>
+<a href="/">Поиск</a>
+<a href="/upload">Загрузка файлов</a>
+<a href="/index">Индекс</a>
+<a href="/db">БД</a>
 <a href="/metrics">Оценка качества</a>
-<a href="/help">Помощь</a></nav></header><main>{{body|safe}}</main></body></html>
+<a href="/help">Помощь</a>
+</nav></header><main>{{body|safe}}</main></body></html>
 """
 
 
@@ -345,7 +490,7 @@ def page(body):
     return render_template_string(TEMPLATE, css=CSS, body=body)
 
 
-# ----------------------- Маршруты -----------------------
+# ---------- маршруты ----------
 
 @app.route("/")
 def home():
@@ -353,26 +498,61 @@ def home():
     body = f"""
     <div class="card"><h2>Поиск документов</h2>
     <form><input type="text" name="q" value="{html_escape(q)}"
-    placeholder="Например: информационный поиск локальная сеть">
+    placeholder="Например: еда, поиск, локальная сеть">
     <button>Найти</button></form>
     <p class="muted">Слова без операторов автоматически объединяются через И.
-    Поддерживаются И, ИЛИ, НЕ и скобки.</p></div>
+    Поддерживаются И, ИЛИ, НЕ и скобки.
+    Итоговый балл = {ALPHA}·логика + {BETA}·семантика.
+    Если логика ничего не нашла — работает только семантика.</p></div>
     """
     if q:
         try:
             results, expression = search(q)
             body += f'<div class="card"><b>Запрос:</b> {html_escape(expression)}'
             body += f'<br><b>Найдено:</b> {len(results)}</div>'
-            for score, doc, present in results:
-                words = " ".join(
-                    f'<span class="badge">{html_escape(x)}</span>' for x in present
-                ) or '<span class="muted">нет</span>'
+            if not results:
+                body += ('<div class="card muted">Ничего не найдено. '
+                         'Попробуйте переформулировать запрос или '
+                         'загрузить больше документов.</div>')
+            for r in results:
+                doc = r["doc"]
+                # Точные слова запроса
+                if r["present"]:
+                    words = " ".join(
+                        f'<span class="badge">{html_escape(x)}</span>'
+                        for x in r["present"]
+                    )
+                else:
+                    words = '<span class="muted">нет</span>'
+
+                # Семантические совпадения
+                match_html = ""
+                if r["matches"]:
+                    items = []
+                    for m in r["matches"]:
+                        items.append(
+                            f'<span class="badge-sem">'
+                            f'«{html_escape(m["query_term"])}» '
+                            f'≈ <b>{html_escape(m["source_form"])}</b> '
+                            f'({m["similarity"]:.2f})</span>'
+                        )
+                    match_html = (
+                        '<p><b>Семантические совпадения '
+                        '(слово запроса ↔ слово документа):</b><br>'
+                        + " ".join(items) + '</p>'
+                    )
+
                 body += f"""
                 <div class="card">
                 <h3><a href="/document/{doc["id"]}" target="_blank">
                 {html_escape(doc["filename"])}</a></h3>
                 <b>Слова запроса в документе:</b> {words}
-                <p class="muted">Вес для сортировки: {score:.4f}</p>
+                {match_html}
+                <p class="muted">
+                  Итоговый балл: {r["score"]:.4f}
+                  &nbsp;|&nbsp; логический: {r["logical"]:.4f}
+                  &nbsp;|&nbsp; семантический: {r["semantic"]:.4f}
+                </p>
                 </div>"""
         except ValueError as e:
             body += f'<div class="card error">{html_escape(e)}</div>'
@@ -404,7 +584,8 @@ def upload():
             count += 1
         if count:
             INDEX.rebuild()
-            message = f"Загружено файлов: {count}. Индекс перестроен и сохранён в SQLite."
+            message = (f"Загружено файлов: {count}. "
+                       f"Индекс перестроен, эмбеддинги пересчитаны.")
 
     files = sorted(
         p.name for p in DOCUMENTS_DIR.iterdir()
@@ -423,8 +604,7 @@ def upload():
       <button type="submit">Загрузить и индексировать</button>
     </form>
     <p class="muted">Файлы хранятся в папке <code>documents</code>,
-    а индексы — в базе <code>index.db</code> (SQLite). Можно выбрать сразу
-    несколько файлов.</p>
+    индексы и эмбеддинги — в базе <code>index.db</code> (SQLite).</p>
     {"<p><b>"+message+"</b></p>" if message else ""}
     {"<p class=error>"+error+"</p>" if error else ""}
     </div>
@@ -462,6 +642,7 @@ def index_page():
     <div class="card"><h2>Модуль индексирования</h2>
     <p>Документов в индексе: <b>{len(INDEX.documents)}</b></p>
     <p>Уникальных терминов: <b>{len(INDEX.idf)}</b></p>
+    <p>Векторов (эмбеддингов): <b>{len(INDEX.embeddings)}</b></p>
     <p>Вес термина: <code>A_ij = Q_ij × B_i</code>,
     где <code>B_i = ln(N / df_i)</code>.</p>
     <p class="muted">Индекс хранится в SQLite: <code>{html_escape(str(db.DB_PATH))}</code></p>
@@ -481,16 +662,13 @@ def reindex():
 @app.route("/db")
 def db_page():
     meta = db.get_meta()
-
-    # Статистика по таблицам
     conn = db.get_conn()
     counts = {
         "documents": conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0],
         "terms":     conn.execute("SELECT COUNT(*) FROM terms").fetchone()[0],
         "postings":  conn.execute("SELECT COUNT(*) FROM postings").fetchone()[0],
+        "embeddings":conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0],
     }
-
-    # Топ-20 терминов по df
     top_terms = conn.execute(
         "SELECT lemma, df, idf FROM terms ORDER BY df DESC, lemma LIMIT 20"
     ).fetchall()
@@ -512,6 +690,7 @@ def db_page():
       <tr><td>documents</td><td>{counts["documents"]}</td></tr>
       <tr><td>terms</td><td>{counts["terms"]}</td></tr>
       <tr><td>postings</td><td>{counts["postings"]}</td></tr>
+      <tr><td>embeddings</td><td>{counts["embeddings"]}</td></tr>
     </table>
     <p><a href="/reindex">Переиндексировать</a></p>
     </div>
@@ -532,7 +711,7 @@ def metrics_page():
     if request.method == "POST" and q:
         try:
             results, _ = search(q)
-            ranked = [x[1]["id"] for x in results]
+            ranked = [r["doc"]["id"] for r in results]
             relevant = {
                 int(x) for x in re.split(r"[,;\s]+", rel_text.strip()) if x
             } & INDEX.all_ids
@@ -584,20 +763,21 @@ def help_page():
     <code>поиск И НЕ интернет</code>,
     <code>(поиск И документы) ИЛИ индексирование</code>.</p>
 
-    <h3>3. Индекс</h3>
+    <h3>3. Семантический поиск</h3>
+    <p>Если в запросе есть слова, которых нет в документах, система
+    подбирает близкие по смыслу слова из документа. Например, запрос
+    <code>еда</code> может найти документ про омлет — в результатах
+    будет показано, к какому именно слову документа оказался близок
+    запрос: <code>«еда» ≈ омлет (0.48)</code>.</p>
+
+    <h3>4. Индекс</h3>
     <p>Ключевые слова выделяются автоматически по формуле
     <code>A_ij = Q_ij × B_i</code>, где <code>B_i = ln(N / df_i)</code>.
-    Индекс хранится в базе данных SQLite — файл <code>index.db</code>
-    в папке проекта.</p>
+    Индекс и векторы хранятся в SQLite — файл <code>index.db</code>.</p>
 
-    <h3>4. Оценка</h3>
+    <h3>5. Оценка</h3>
     <p>Введите запрос и ID документов, которые эксперт считает релевантными.
     Система рассчитает метрики и построит график Precision–Recall.</p>
-
-    <h3>5. Хранилище</h3>
-    <p>В разделе «БД» можно посмотреть статистику индекса: количество
-    документов, терминов, постингов и топ-20 наиболее частых терминов.
-    </p>
     </div>"""
     return page(body)
 
@@ -606,14 +786,14 @@ if __name__ == "__main__":
     DOCUMENTS_DIR.mkdir(exist_ok=True)
     db.init_db()
 
-    if db.db_exists_and_filled():
-        # Индекс уже есть — просто загружаем (быстро!)
+    if db.db_exists_and_filled() and db.embeddings_ready():
         INDEX.load()
-        print(f"[db] Загружено документов из index.db: {len(INDEX.documents)}")
+        print(f"[db] Загружено документов: {len(INDEX.documents)}, "
+              f"векторов: {len(INDEX.embeddings)}")
     else:
-        # Первый запуск — строим индекс и сохраняем в БД
-        print("[db] Индекс пуст, строю заново...")
+        print("[db] Индекс пуст или эмбеддингов нет, строю заново...")
         INDEX.rebuild()
-        print(f"[db] Сохранено документов: {len(INDEX.documents)}")
+        print(f"[db] Готово: документов {len(INDEX.documents)}, "
+              f"векторов {len(INDEX.embeddings)}")
 
     app.run(host="0.0.0.0", port=5000, debug=False)
