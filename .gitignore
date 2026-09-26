@@ -1,0 +1,6 @@
+documents/
+index.db
+__pycache__
+venv
+.venv
+.idea

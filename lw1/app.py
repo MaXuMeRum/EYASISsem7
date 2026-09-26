@@ -3,7 +3,6 @@ from pathlib import Path
 from collections import Counter, defaultdict
 import base64
 import io
-import math
 import re
 
 from flask import (

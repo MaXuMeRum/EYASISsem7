@@ -1,0 +1,2 @@
+Ein modernes Informationssystem kann Dokumente speichern und verarbeiten. Der Benutzer lädt eine Datei hoch,
+danach wird der Text extrahiert und die Sprache bestimmt. Das Ergebnis kann in einem Bericht gespeichert werden.
