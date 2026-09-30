@@ -1,9 +1,15 @@
 import re
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 from PyQt6.QtCore import Qt
-import PyQt6.QtWidgets
+from PyQt6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTabWidget,
+    QTableWidget, QTableWidgetItem, QPushButton, QLabel, QTextEdit, QLineEdit,
+    QFileDialog, QMessageBox, QComboBox, QDialog, QFormLayout, QDialogButtonBox,
+    QSpinBox, QHeaderView, QListWidget
+)
+
 
 
 class DictionaryDialog(QDialog):
