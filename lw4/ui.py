@@ -1,4 +1,3 @@
-import re
 from pathlib import Path
 
 import pymupdf as fitz
@@ -7,9 +6,8 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QTabWidget,
     QTableWidget, QTableWidgetItem, QPushButton, QLabel, QTextEdit, QLineEdit,
     QFileDialog, QMessageBox, QComboBox, QDialog, QFormLayout, QDialogButtonBox,
-    QSpinBox, QHeaderView, QListWidget
+    QHeaderView, QListWidget
 )
-
 
 
 class DictionaryDialog(QDialog):
@@ -93,7 +91,6 @@ class MainWindow(QMainWindow):
         # --- Вкладка 0: перевод ---
         translation_tab = QWidget()
         t_layout = QVBoxLayout(translation_tab)
-
         splitter = QSplitter(Qt.Orientation.Horizontal)
         left = QWidget()
         right = QWidget()
@@ -178,7 +175,6 @@ class MainWindow(QMainWindow):
         s_layout.addWidget(self.dot_view)
         self.tabs.addTab(syntax_tab, "Синтаксический разбор")
 
-        # --- Словарь БД ---
         self.connect_signals()
         self.refresh_dictionary()
 
@@ -214,9 +210,9 @@ class MainWindow(QMainWindow):
     def translate(self):
         text = self.input_text.toPlainText().strip()
         if not text:
-            QMessageBox.warning(self, "Нет текста", "Введите или загрузите английский текст.")
+            QMessageBox.warning(self, "Нет текста",
+                                "Введите или загрузите английский текст.")
             return
-
         try:
             self.status.setText("Анализ и перевод...")
             self.current_text = text
@@ -225,8 +221,7 @@ class MainWindow(QMainWindow):
 
             source_count = self.nlp.word_count(text)
             translated_count = self.nlp.word_count(self.current_translation)
-            # "Переведено" — количество слов исходного текста, для лемм которых
-            # удалось получить русский перевод из БД или переводчика.
+
             self.current_frequency = self.nlp.frequency_table(
                 self.current_rows, self.db
             )
@@ -240,6 +235,7 @@ class MainWindow(QMainWindow):
                 f"Слов в переводе: {translated_count} | "
                 f"Переведено исходных слов: {translated_lemmas}"
             )
+
             self.load_sentences()
             self.refresh_dictionary()
             self.status.setText("Готово")
@@ -251,8 +247,7 @@ class MainWindow(QMainWindow):
             self.status.setText("Ошибка")
             QMessageBox.critical(
                 self, "Ошибка перевода",
-                "Не удалось выполнить обработку.\n\n"
-                + str(e) +
+                "Не удалось выполнить обработку.\n\n" + str(e) +
                 "\n\nПроверьте интернет-соединение и установку моделей spaCy."
             )
 
@@ -268,13 +263,15 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Выбор предложения",
                                     "Сначала выберите предложение.")
             return
+
         sentence = list(self.current_doc.sents)[self.sentences.currentRow()]
+
         try:
-            dot = (
-                self.nlp.dependency_dot(sentence)
-                if tree_type == "dep"
-                else self.nlp.constituency_dot(sentence)
-            )
+            if tree_type == "dep":
+                dot = self.nlp.dependency_dot(sentence)
+            else:
+                # ВАЖНО: передаём текст предложения, а не Span
+                dot = self.nlp.constituency_dot(sentence.text)
             self.dot_view.setPlainText(dot)
         except Exception as e:
             self.dot_view.setPlainText(f"Ошибка построения дерева:\n{e}")
@@ -296,20 +293,10 @@ class MainWindow(QMainWindow):
 
             r = self.table.rowCount()
             self.table.insertRow(r)
-            values = [
-                lemma, str(frequency_map.get(lemma, 0)), ru, pos,
-                pos_desc, dom, comment, str(id_)
-            ]
+            values = [lemma, str(frequency_map.get(lemma, 0)), ru, pos,
+                      pos_desc, dom, comment, str(id_)]
             for c, value in enumerate(values):
                 self.table.setItem(r, c, QTableWidgetItem(value))
-
-        # Внутри текущего текста строки фактически сортируются по частоте.
-        if self.current_frequency and not query and domain == "Все":
-            ordered = {x["lemma"]: x for x in self.current_frequency}
-            for i in range(self.table.rowCount()):
-                lemma = self.table.item(i, 0).text()
-                if lemma in ordered:
-                    self.table.item(i, 1).setText(str(ordered[lemma]["frequency"]))
 
     def selected_lemma(self):
         row = self.table.currentRow()
@@ -381,17 +368,13 @@ class MainWindow(QMainWindow):
         lines.append("")
         lines.append("ЧАСТОТНЫЙ СЛОВАРЬ")
         lines.append("-" * 70)
-        lines.append(
-            "№ | Лемма | Частота | Перевод | POS | Расшифровка | Область"
-        )
-
+        lines.append("№ | Лемма | Частота | Перевод | POS | Расшифровка | Область")
         for i, item in enumerate(self.current_frequency, 1):
             lines.append(
                 f"{i} | {item['lemma']} | {item['frequency']} | "
                 f"{item['translation']} | {item['pos']} | "
                 f"{item['pos_description']} | {item['domain']}"
             )
-
         lines.append("")
         lines.append("ГРАММАТИЧЕСКАЯ ИНФОРМАЦИЯ")
         lines.append("-" * 70)

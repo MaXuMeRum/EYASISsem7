@@ -40,8 +40,9 @@ class DictionaryDB:
             """)
 
     def seed_domain_dictionary(self):
-        # Небольшой встроенный словарь для двух заданных предметных областей.
+        """Небольшой встроенный словарь для двух заданных предметных областей."""
         entries = [
+            # medicine
             ("article", "статья", "NOUN", "существительное", "medicine"),
             ("medical", "медицинский", "ADJ", "прилагательное", "medicine"),
             ("patient", "пациент", "NOUN", "существительное", "medicine"),
@@ -52,6 +53,17 @@ class DictionaryDB:
             ("clinical", "клинический", "ADJ", "прилагательное", "medicine"),
             ("therapy", "терапия", "NOUN", "существительное", "medicine"),
             ("diagnostic", "диагностический", "ADJ", "прилагательное", "medicine"),
+            ("study", "исследование", "NOUN", "существительное", "medicine"),
+            ("result", "результат", "NOUN", "существительное", "medicine"),
+            ("method", "метод", "NOUN", "существительное", "medicine"),
+            ("analysis", "анализ", "NOUN", "существительное", "medicine"),
+            ("data", "данные", "NOUN", "существительное", "medicine"),
+            ("risk", "риск", "NOUN", "существительное", "medicine"),
+            ("health", "здоровье", "NOUN", "существительное", "medicine"),
+            ("cell", "клетка", "NOUN", "существительное", "medicine"),
+            ("blood", "кровь", "NOUN", "существительное", "medicine"),
+            ("organ", "орган", "NOUN", "существительное", "medicine"),
+            # art
             ("art", "искусство", "NOUN", "существительное", "art"),
             ("painting", "живопись", "NOUN", "существительное", "art"),
             ("sculpture", "скульптура", "NOUN", "существительное", "art"),
@@ -62,8 +74,16 @@ class DictionaryDB:
             ("colour", "цвет", "NOUN", "существительное", "art"),
             ("canvas", "холст", "NOUN", "существительное", "art"),
             ("criticism", "критика", "NOUN", "существительное", "art"),
+            ("critique", "критика", "NOUN", "существительное", "art"),
             ("aesthetic", "эстетический", "ADJ", "прилагательное", "art"),
             ("style", "стиль", "NOUN", "существительное", "art"),
+            ("image", "образ", "NOUN", "существительное", "art"),
+            ("form", "форма", "NOUN", "существительное", "art"),
+            ("masterpiece", "шедевр", "NOUN", "существительное", "art"),
+            ("gallery", "галерея", "NOUN", "существительное", "art"),
+            ("exhibition", "выставка", "NOUN", "существительное", "art"),
+            ("work", "произведение", "NOUN", "существительное", "art"),
+            ("light", "свет", "NOUN", "существительное", "art"),
         ]
         with self.connect() as con:
             for e in entries:
