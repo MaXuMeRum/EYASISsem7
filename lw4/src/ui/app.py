@@ -25,9 +25,98 @@ class App:
         return self._analyzers[lang]
 
     # ------------------------------------------------------------------
+    def _inject_styles(self):
+        """Единый визуальный стиль интерфейса. Логика приложения не изменяется."""
+        st.markdown("""
+        <style>
+        .stApp {
+            background: #f5f7fb;
+        }
+        [data-testid="stHeader"] {
+            background: rgba(245,247,251,.92);
+        }
+        .block-container {
+            max-width: 1400px;
+            padding-top: 2rem;
+            padding-bottom: 3rem;
+        }
+        .hero {
+            background: linear-gradient(135deg, #172554 0%, #1e3a8a 55%, #2563eb 100%);
+            color: white;
+            padding: 28px 32px;
+            border-radius: 20px;
+            margin-bottom: 24px;
+            box-shadow: 0 12px 30px rgba(30,58,138,.18);
+        }
+        .hero h1 { margin: 0 0 8px 0; font-size: 2rem; }
+        .hero p { margin: 0; opacity: .86; font-size: 1rem; }
+        .section-card {
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 16px;
+            padding: 20px;
+            margin: 10px 0 18px 0;
+            box-shadow: 0 4px 14px rgba(15,23,42,.05);
+        }
+        .section-title {
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: #172554;
+            margin-bottom: 4px;
+        }
+        .section-caption { color: #64748b; margin-bottom: 14px; }
+        div[data-testid="stMetric"] {
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 14px;
+            padding: 12px 14px;
+            box-shadow: 0 3px 10px rgba(15,23,42,.04);
+        }
+        .result-box {
+            background: #eff6ff;
+            border: 1px solid #bfdbfe;
+            border-radius: 14px;
+            padding: 18px 20px;
+            line-height: 1.7;
+            font-size: 1.05rem;
+        }
+        .danger-box {
+            background: #fff7ed;
+            border: 1px solid #fed7aa;
+            border-radius: 14px;
+            padding: 16px;
+        }
+        div.stButton > button, div.stDownloadButton > button {
+            border-radius: 10px;
+            font-weight: 600;
+        }
+        .small-note { color:#64748b; font-size:.88rem; }
+        </style>
+        """, unsafe_allow_html=True)
+
+    def _hero(self):
+        st.markdown("""
+        <div class="hero">
+            <h1>EN → RU · Машинный перевод</h1>
+            <p>Перевод текста, частотный анализ, морфология, синтаксические деревья и управление словарём.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    def _card_start(self, title, caption=None):
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.markdown(f'<div class="section-title">{title}</div>', unsafe_allow_html=True)
+        if caption:
+            st.markdown(f'<div class="section-caption">{caption}</div>', unsafe_allow_html=True)
+
+    def _card_end(self):
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ------------------------------------------------------------------
     def run(self):
-        st.title("Машинный перевод")
-        tab1, tab2, tab3 = st.tabs(["Перевод", "Словарь", "Справка"])
+        self._inject_styles()
+        self._hero()
+
+        tab1, tab2, tab3 = st.tabs(["🔤  Перевод", "📚  Словарь", "❔  Справка"])
         with tab1:
             self._render_translation()
         with tab2:
@@ -40,9 +129,9 @@ class App:
     # ------------------------------------------------------------------
     def _render_translation(self):
         sub1, sub2, sub3 = st.tabs([
-            "Перевод",
-            "Список по частоте",
-            "Дерево разбора",
+            "🚀  Перевод",
+            "📊  Частотный анализ",
+            "🌳  Синтаксический разбор",
         ])
         with sub1:
             self._render_translation_tab()
@@ -55,9 +144,9 @@ class App:
     # Под-вкладка 1: перевод
     # ------------------------------------------------------------------
     def _render_translation_tab(self):
-        st.subheader("Входной текст (английский)")
+        self._card_start("Исходный текст", "Загрузите документ или вставьте английский текст вручную.")
 
-        col1, col2 = st.columns([2, 1])
+        col1, col2 = st.columns([1.7, 1])
         with col1:
             uploaded = st.file_uploader(
                 "Загрузите PDF или TXT (EN)",
@@ -88,7 +177,14 @@ class App:
         if manual_text.strip():
             source_text = manual_text
 
-        if st.button("Перевести", type="primary", key="translate_btn"):
+        self._card_end()
+        action_col, info_col = st.columns([1, 3])
+        with action_col:
+            translate_clicked = st.button("🚀 Перевести", type="primary", key="translate_btn", use_container_width=True)
+        with info_col:
+            st.markdown('<div class="small-note">После перевода станут доступны статистика, грамматическая информация и деревья разбора.</div>', unsafe_allow_html=True)
+
+        if translate_clicked:
             if not source_text.strip():
                 st.warning("Загрузите файл или введите текст.")
             else:
@@ -115,6 +211,7 @@ class App:
             return
 
         # ---- Метрики ----
+        st.markdown("### Результат")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Всего слов", res['total_words'])
         c2.metric("Переведено", res['translated_words'])
@@ -128,8 +225,8 @@ class App:
                        + ", ".join(sorted(set(res['unknown_words']))))
 
         # ---- Перевод ----
-        st.subheader("Перевод")
-        st.success(res['translation'])
+        st.markdown("#### Перевод на русский")
+        st.markdown(f'<div class="result-box">{res["translation"]}</div>', unsafe_allow_html=True)
 
         # ---- Экспорт ----
         report_txt = self.engine.export_txt(res)
@@ -139,10 +236,11 @@ class App:
             report_pdf = None
             st.warning(f"Экспорт в PDF недоступен: {e}")
 
+        st.markdown("#### Экспорт результата")
         c1, c2 = st.columns(2)
         with c1:
             st.download_button(
-                "Скачать перевод (TXT)",
+                "⬇️ Скачать перевод (TXT)",
                 data=report_txt,
                 file_name="translation_report.txt",
                 mime="text/plain; charset=utf-8",
@@ -151,7 +249,7 @@ class App:
         with c2:
             if report_pdf:
                 st.download_button(
-                    "Скачать перевод (PDF)",
+                    "⬇️ Скачать перевод (PDF)",
                     data=report_pdf,
                     file_name="translation_report.pdf",
                     mime="application/pdf",
@@ -162,7 +260,8 @@ class App:
     # Под-вкладка 2: список слов по частоте (вкладка 1 методички)
     # ------------------------------------------------------------------
     def _render_statistics_tab(self):
-        st.subheader("Список слов по частоте с переводом и грамматикой")
+        st.markdown("### 📊 Список слов по частоте")
+        st.caption("Леммы отсортированы по частоте; доступны перевод и грамматические характеристики.")
         res = st.session_state.get('mt_result')
         if not res:
             st.info("Сначала выполните перевод во вкладке «Перевод».")
@@ -316,7 +415,8 @@ class App:
     # Вкладка «Словарь»
     # ------------------------------------------------------------------
     def _render_dictionary(self):
-        st.subheader("Словарь EN → RU")
+        st.markdown("### 📚 Словарь EN → RU")
+        st.caption("Редактирование пользовательского словаря и автоматическое пополнение через Argos.")
 
         c1, c2 = st.columns([3, 1])
         with c1:
@@ -347,7 +447,7 @@ class App:
             st.info("Словарь пуст.")
 
         st.divider()
-        st.subheader("Добавить / изменить запись")
+        st.markdown("### Добавить или изменить запись")
         col1, col2, col3 = st.columns(3)
         with col1:
             src = st.text_input("Слово (EN)", key="dict_add_src")
@@ -410,7 +510,7 @@ class App:
 
         # ---- Импорт / экспорт словаря ----
         st.divider()
-        st.subheader("Импорт и экспорт словаря")
+        st.markdown("### Импорт и экспорт")
         st.caption("Формат строки: `EN <разделитель> RU [<разделитель> POS "
                    "[<разделитель> tag [<разделитель> morph]]]`. "
                    "Разделитель: `\\t`, `|`, `;` или `,`. Строки с `#` "
@@ -441,7 +541,7 @@ class App:
 
         # ---- Полная очистка словаря ----
         st.divider()
-        st.subheader("Опасная зона")
+        st.markdown("### ⚠️ Опасная зона")
         st.caption("Действие необратимо. Перед удалением рекомендуется "
                    "скачать резервную копию кнопкой выше.")
 
@@ -468,4 +568,5 @@ class App:
     # Вкладка «Справка»
     # ------------------------------------------------------------------
     def _render_help(self):
+        st.markdown("### ❔ Справка")
         st.markdown(HELP_TEXT)
